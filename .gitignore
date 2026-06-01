@@ -31,3 +31,6 @@ solutions/*
 # Airflow
 airflow.cfg
 airflow.db
+
+.env
+env
