@@ -38,10 +38,12 @@ graph TD
 
 | Pipeline | Approche | Justification |
 |----------|----------|---------------|
-| catalog_ingestion | ETL | ... |
-| streaming_events | ... | ... |
-| aggregation | ... | ... |
-| streaming_trends (Spark) | ... | ... |
+| `catalog_ingestion` | **ETL** | Les données JSON des labels sont validées et normalisées en Python (noms d'artistes, dédoublonnage, vérification des champs) **avant** d'être insérées dans PostgreSQL. La transformation hors-base est nécessaire car le schéma PostgreSQL est strict (UNIQUE, NOT NULL). |
+| `streaming_events` | **ETL** | Le simulateur P2P enrichit chaque événement (ajout device_type, geo_country, event_source) **avant** de le publier dans Redis/Kafka. L'événement arrive déjà structuré dans la base. |
+| `aggregation` | **ELT** | Les `listening_events` sont déjà dans PostgreSQL. Les agrégats (`daily_streams`, `artist_stats`) sont calculés directement par des requêtes SQL (`GROUP BY`, `COUNT`). On charge d'abord, on transforme ensuite dans la base. |
+| `recommendation` | **ELT** | Les données d'écoute sont dans PostgreSQL. Le scoring est calculé par des requêtes SQL de fréquence, puis le résultat est mis en cache dans Redis. Transformation dans la base, pas en dehors. |
+| `dlq_reprocessing` | **ETL** | Les événements de la DLQ sont relus, re-validés et re-transformés en Python **avant** d'être réinjectés dans le pipeline principal. |
+| `streaming_trends` (Spark) | **ELT** | Spark lit les messages bruts depuis Kafka (**Extract + Load en mémoire**), applique les fenêtres temporelles et agrégations en mémoire distribuée (**Transform**), puis écrit dans PostgreSQL et Redis. C'est un ELT in-memory : la transformation se fait dans le moteur de traitement, pas dans la base destination. |
 
 ### Partitionnement Parquet
 
