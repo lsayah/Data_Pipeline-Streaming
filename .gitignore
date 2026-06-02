@@ -32,5 +32,7 @@ solutions/*
 airflow.cfg
 airflow.db
 
+.env
+env
 
 Cours_Agent_IA_Complet.pdf

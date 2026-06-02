@@ -2,7 +2,7 @@
 # pip install -r requirements.txt
 
 # ── Airflow (installer via pip[apache-airflow] ou l'image Docker)
-# apache-airflow[celery,postgres,redis,amazon]==2.9.1
+apache-airflow[celery,postgres,redis,amazon]==2.9.1
 
 # ── Génération de données
 faker==24.0.0
