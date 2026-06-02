@@ -57,12 +57,23 @@ EVENT_SOURCES = ["p2p", "p2p", "p2p", "direct", "cache"]  # pondéré : 60% P2P
 # DONNÉES SIMULÉES
 # ─────────────────────────────────────────────────────────────
 
-# Ces UUIDs seront remplacés par les vrais IDs depuis PostgreSQL
-# Une fois votre base peuplée, charger dynamiquement avec _load_catalog()
-SAMPLE_TRACKS = [
-    {"id": str(uuid.uuid4()), "title": f"Track {i}", "duration_ms": random.randint(120000, 300000)}
-    for i in range(50)
-]
+def _load_catalog() -> list:
+    """Charge les vrais track_id depuis PostgreSQL. Fallback sur des IDs aléatoires si indisponible."""
+    try:
+        import psycopg2
+        conn = psycopg2.connect(host="localhost", port=5432, dbname="spotify", user="spotify", password="spotify")
+        with conn.cursor() as cur:
+            cur.execute("SELECT id::text, title, duration_ms FROM tracks LIMIT 100")
+            rows = cur.fetchall()
+        conn.close()
+        tracks = [{"id": row[0], "title": row[1], "duration_ms": row[2]} for row in rows]
+        print(f"✅ {len(tracks)} tracks chargés depuis PostgreSQL")
+        return tracks
+    except Exception as e:
+        print(f"⚠️ PostgreSQL indisponible ({e}), utilisation des IDs aléatoires")
+        return [{"id": str(uuid.uuid4()), "title": f"Track {i}", "duration_ms": random.randint(120000, 300000)} for i in range(50)]
+
+SAMPLE_TRACKS = _load_catalog()
 
 SAMPLE_USERS = [str(uuid.uuid4()) for _ in range(200)]
 SAMPLE_PEERS = [str(uuid.uuid4()) for _ in range(20)]

@@ -99,24 +99,31 @@ with DAG(
     def consume_from_redis() -> List[dict]:
 
         # Se connecter à Redis
-        r = redis.from_url("redis://localhost:6379/1", decode_responses=True)
-        
+        r = redis.from_url("redis://redis:6379/1", decode_responses=True)
+
+        # S'abonner aux deux channels pub/sub
+        pubsub = r.pubsub()
+        pubsub.subscribe("listening_events", "p2p_network_events")
+
         events = []
         start_time = time.time()
-        
+
         try:
             while time.time() - start_time < BATCH_WINDOW_SEC:
-                message = r.blpop("listening_events", timeout=1)
-                
-                if message:
-                    events.append(json.loads(message[1]))
-            
+                message = pubsub.get_message(timeout=1)
+                if message and message["type"] == "message":
+                    events.append(json.loads(message["data"]))
+
             print(f"✅ {len(events)} événements récupérés de Redis")
             return events
-        
+
         except Exception as e:
             print(f"❌ Erreur Redis: {e}")
             return []
+
+        finally:
+            pubsub.unsubscribe()
+            pubsub.close()
 
     @task(task_id="validate_events")
     def validate_events(raw_events: List[dict]) -> dict:
@@ -214,7 +221,7 @@ with DAG(
         with hook.get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT id, title, artist_id, genre FROM tracks WHERE id = ANY(%s)",
+                    "SELECT id::text, title, artist_id::text, genre FROM tracks WHERE id::text = ANY(%s)",
                     (track_ids,),
                 )
                 catalogue = {row[0]: {"track_title": row[1], "artist_id": row[2], "genre": row[3]}
@@ -284,15 +291,12 @@ with DAG(
             print("Aucun event à insérer")
             return {"inserted": 0, "skipped": 0}
 
-        # préparer les tuples à insérer
+        # préparer les tuples à insérer selon le vrai schéma listening_events
         rows = [
             (
                 e["event_id"],
                 e["user_id"],
                 e["track_id"],
-                e.get("track_title"),
-                e.get("artist_id"),
-                e.get("genre"),
                 e["timestamp"],
                 e["duration_ms"],
             )
@@ -305,9 +309,8 @@ with DAG(
             with conn.cursor() as cur:
                 cur.executemany(
                     """
-                    INSERT INTO listening_events
-                        (id, user_id, track_id, track_title, artist_id, genre, listened_at, duration_ms)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO listening_events (id, user_id, track_id, timestamp, duration_ms)
+                    VALUES (%s::uuid, %s::uuid, %s::uuid, %s::timestamp, %s)
                     ON CONFLICT (id) DO NOTHING
                     """,
                     rows,
