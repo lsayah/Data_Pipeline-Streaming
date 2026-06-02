@@ -11,19 +11,16 @@ Architecture :
         → fetch_pending_dlq()       ← récupérer les events à retraiter
         → reprocess_events()        ← tenter de corriger et réinjecter
         → update_dlq_status()       ← marquer reprocessed ou abandoned
-
-TODO :
-    [ ] Implémenter fetch_pending_dlq()
-    [ ] Implémenter reprocess_events()
-    [ ] Implémenter update_dlq_status()
-    [ ] Tester avec injection de données corrompues
-    [ ] Ajouter doc_md sur ce DAG
 """
 
-from datetime import datetime, timedelta
+import json
+import logging
+import uuid
+from datetime import datetime, timedelta, timezone
 
 from airflow import DAG
 from airflow.decorators import task
+from airflow.providers.postgres.hooks.postgres import PostgresHook
 
 DAG_DOC = """
 ## dlq_reprocessing_pipeline
@@ -41,14 +38,11 @@ Tente de corriger les erreurs et de réinjecter les events valides.
 3. Si succès → réinjecter dans `listening_events` + `status = 'reprocessed'`
 4. Si échec après 3 tentatives → `status = 'abandoned'`
 
-### Test d'\''injection
+### Test d'injection
 ```sql
 INSERT INTO dead_letter_events (payload, error_type, original_topic)
 VALUES ('{"user_id": null, "track_id": "invalid"}', 'missing_fields', 'listening_events');
 ```
-
-### TODO
-Compléter les 3 tâches marquées NotImplementedError.
 """
 
 DEFAULT_ARGS = {
@@ -62,7 +56,7 @@ DEFAULT_ARGS = {
 
 POSTGRES_CONN_ID = "spotify_postgres"
 MAX_RETRIES      = 3
-BATCH_SIZE       = 100   # traiter par lots pour ne pas surcharger
+BATCH_SIZE       = 100
 
 
 with DAG(
@@ -77,59 +71,183 @@ with DAG(
 ) as dag:
 
     @task(task_id="fetch_pending_dlq")
-    def fetch_pending_dlq(**context) -> list:
-        """
-        Récupère les événements en attente de retraitement.
+    def fetch_pending_dlq() -> list:
+        """Récupère les événements pending depuis dead_letter_events."""
+        hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
+        conn = hook.get_conn()
+        cursor = conn.cursor()
 
-        TODO :
-            1. Utiliser PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
-            2. Requête :
-               SELECT id, payload, error_type, retry_count, original_topic
-               FROM dead_letter_events
-               WHERE status = 'pending'
-                 AND retry_count < %(max_retries)s
-               ORDER BY created_at ASC
-               LIMIT %(batch_size)s
-            3. Retourner la liste des events à retraiter
-            4. Logger : "X événements pending trouvés"
-        """
-        raise NotImplementedError("TODO : implémenter fetch_pending_dlq()")
+        cursor.execute(
+            """
+            SELECT id, payload, error_type, retry_count, original_topic
+            FROM dead_letter_events
+            WHERE status = 'pending'
+              AND retry_count < %s
+            ORDER BY created_at ASC
+            LIMIT %s
+            """,
+            (MAX_RETRIES, BATCH_SIZE),
+        )
+
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        events = [
+            {
+                "id":            str(row[0]),
+                "payload":       row[1],
+                "error_type":    row[2],
+                "retry_count":   row[3],
+                "original_topic": row[4],
+            }
+            for row in rows
+        ]
+
+        logging.info("%d événements pending trouvés", len(events))
+        return events
 
     @task(task_id="reprocess_events")
-    def reprocess_events(pending_events: list, **context) -> dict:
+    def reprocess_events(pending_events: list) -> dict:
         """
-        Tente de corriger et réinjecter chaque événement défectueux.
+        Tente de corriger chaque événement défectueux.
 
-        TODO :
-            1. Pour chaque event, parser le payload JSON
-            2. Tenter la validation des champs obligatoires
-            3. Tenter la correction si possible :
-               - user_id manquant → impossible à corriger → abandoned
-               - timestamp invalide → utiliser created_at comme fallback
-               - track_id inconnu → vérifier dans tracks, si absent → abandoned
-            4. Si valide : préparer pour réinsertion dans listening_events
-            5. Retourner {"reprocessed": [...], "failed": [...]}
+        Règles de correction :
+        - user_id manquant ou null  → impossible à corriger → failed
+        - track_id manquant ou null → impossible à corriger → failed
+        - timestamp manquant        → remplacé par NOW()   → reprocessed
+        - Tous les champs présents  → réinjecté tel quel   → reprocessed
         """
-        raise NotImplementedError("TODO : implémenter reprocess_events()")
+        hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
+        conn = hook.get_conn()
+        cursor = conn.cursor()
+
+        reprocessed = []
+        failed = []
+
+        for event in pending_events:
+            payload = event["payload"]
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except json.JSONDecodeError:
+                    failed.append({"id": event["id"], "reason": "payload JSON invalide"})
+                    continue
+
+            user_id  = payload.get("user_id")
+            track_id = payload.get("track_id")
+
+            if not user_id:
+                failed.append({"id": event["id"], "reason": "user_id manquant"})
+                continue
+
+            if not track_id:
+                failed.append({"id": event["id"], "reason": "track_id manquant"})
+                continue
+
+            # Vérifier que le track_id existe dans la table tracks
+            cursor.execute("SELECT 1 FROM tracks WHERE id = %s", (track_id,))
+            if not cursor.fetchone():
+                failed.append({"id": event["id"], "reason": f"track_id inconnu : {track_id}"})
+                continue
+
+            # Corriger le timestamp si absent
+            if not payload.get("timestamp"):
+                payload["timestamp"] = datetime.now(timezone.utc).isoformat()
+
+            reprocessed.append({
+                "id":      event["id"],
+                "payload": payload,
+            })
+
+        cursor.close()
+        conn.close()
+
+        logging.info(
+            "Retraitement : %d succès, %d échecs",
+            len(reprocessed), len(failed),
+        )
+        return {"reprocessed": reprocessed, "failed": failed}
 
     @task(task_id="update_dlq_status")
-    def update_dlq_status(results: dict, **context) -> dict:
+    def update_dlq_status(results: dict) -> dict:
         """
-        Met à jour le statut des événements dans dead_letter_events.
+        Met à jour le statut dans dead_letter_events et insère les events
+        valides dans listening_events.
+        """
+        hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
+        conn = hook.get_conn()
+        cursor = conn.cursor()
 
-        TODO :
-            1. Pour les events retraités avec succès :
-               - INSERT dans listening_events
-               - UPDATE dead_letter_events SET status='reprocessed', resolved_at=NOW()
-            2. Pour les events échoués :
-               - UPDATE dead_letter_events
-                 SET retry_count = retry_count + 1,
-                     last_retry_at = NOW(),
-                     status = CASE WHEN retry_count + 1 >= 3 THEN 'abandoned' ELSE 'pending' END
-            3. Logger le bilan : "X retraités, Y abandonnés, Z encore en pending"
-            4. Retourner les stats
-        """
-        raise NotImplementedError("TODO : implémenter update_dlq_status()")
+        reprocessed = results.get("reprocessed", [])
+        failed      = results.get("failed", [])
+
+        # Insérer les events valides dans listening_events
+        for event in reprocessed:
+            p = event["payload"]
+            try:
+                cursor.execute(
+                    """
+                    INSERT INTO listening_events
+                        (id, user_id, track_id, timestamp, duration_ms,
+                         device_type, geo_country, completed, event_source)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (id) DO NOTHING
+                    """,
+                    (
+                        str(uuid.uuid4()),
+                        p.get("user_id"),
+                        p.get("track_id"),
+                        p.get("timestamp", datetime.now(timezone.utc)),
+                        p.get("duration_ms", 0),
+                        p.get("device_type", "unknown"),
+                        p.get("geo_country", "XX"),
+                        p.get("completed", False),
+                        p.get("event_source", "dlq_reprocessed"),
+                    ),
+                )
+                cursor.execute(
+                    """
+                    UPDATE dead_letter_events
+                    SET status = 'reprocessed', resolved_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (event["id"],),
+                )
+            except Exception as e:
+                conn.rollback()
+                logging.warning("Échec réinsertion event %s : %s", event["id"], e)
+                failed.append({"id": event["id"], "reason": str(e)})
+
+        # Mettre à jour les events échoués
+        for event in failed:
+            cursor.execute(
+                """
+                UPDATE dead_letter_events
+                SET retry_count    = retry_count + 1,
+                    last_retry_at  = NOW(),
+                    status         = CASE
+                                       WHEN retry_count + 1 >= %s THEN 'abandoned'
+                                       ELSE 'pending'
+                                     END
+                WHERE id = %s
+                """,
+                (MAX_RETRIES, event["id"]),
+            )
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        stats = {
+            "reprocessed": len(reprocessed),
+            "failed":      len(failed),
+        }
+        logging.info(
+            "Bilan DLQ — retraités : %d | abandonnés/en attente : %d",
+            stats["reprocessed"], stats["failed"],
+        )
+        return stats
 
     # ── Orchestration ─────────────────────────────────────────
     pending = fetch_pending_dlq()
