@@ -100,24 +100,22 @@ with DAG(
         execution_date = context["data_interval_start"].date()
         hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
         records = hook.get_records("""
-            SELECT a.artist_id,
-                   COUNT(*) as total_streams,
-                   COUNT(DISTINCT le.user_id) as unique_listeners,
-                   MODE() WITHIN GROUP (ORDER BY le.track_id) as top_track_id
+            SELECT t.artist_id,
+                COUNT(*) as total_streams,
+                COUNT(DISTINCT le.user_id) as unique_listeners,
+                MODE() WITHIN GROUP (ORDER BY le.track_id) as top_track_id
             FROM listening_events le
-            JOIN tracks t ON le.track_id = t.track_id
-            JOIN artists a ON t.artist_id = a.artist_id
+            JOIN tracks t ON le.track_id = t.id
             WHERE DATE(le.timestamp) = %(date)s AND le.completed = TRUE
-            GROUP BY a.artist_id
+            GROUP BY t.artist_id
             ORDER BY total_streams DESC
         """, parameters={"date": execution_date})
         return [
             {"artist_id": r[0], "total_streams": r[1], "unique_listeners": r[2],
-             "top_track_id": r[3], "date": str(execution_date)}
+            "top_track_id": r[3], "date": str(execution_date)}
             for r in records
-        ]
-
-    # [x] Implémenter compute_p2p_metrics()
+        ]   
+    
     @task(task_id="compute_p2p_metrics")
     def compute_p2p_metrics(**context) -> dict:
         from airflow.providers.postgres.hooks.postgres import PostgresHook
@@ -127,8 +125,8 @@ with DAG(
             SELECT
                 ROUND(COUNT(*) FILTER (WHERE event_source = 'cache')::numeric
                     / NULLIF(COUNT(*), 0) * 100, 2) as cache_hit_rate,
-                ROUND(AVG(latency_ms), 2) as avg_latency_ms,
-                COUNT(DISTINCT peer_id) as active_peers
+                ROUND(AVG(duration_ms), 2) as avg_duration_ms,
+                COUNT(DISTINCT source_peer_id) as active_peers
             FROM listening_events
             WHERE DATE(timestamp) = %(date)s
         """, parameters={"date": execution_date})
@@ -145,12 +143,11 @@ with DAG(
         return {
             "date": str(execution_date),
             "cache_hit_rate": metrics[0],
-            "avg_latency_ms": metrics[1],
+            "avg_duration_ms": metrics[1],
             "active_peers": metrics[2],
             "device_distribution": {r[0]: r[1] for r in device_dist},
             "geo_distribution": {r[0]: r[1] for r in geo_dist},
         }
-
     # [x] Implémenter update_aggregates()
     @task(task_id="update_aggregates")
     def update_aggregates(top_tracks: list, artist_stats: list, p2p_metrics: dict, **context):
@@ -180,7 +177,7 @@ with DAG(
         if top_tracks:
             top = top_tracks[0]
             print(f"Top track: {top['track_id']} avec {top['total_streams']} streams")
-        print(f"P2P — cache_hit={p2p_metrics['cache_hit_rate']}% | latence={p2p_metrics['avg_latency_ms']}ms")
+        print(f"P2P — cache_hit={p2p_metrics['cache_hit_rate']}% | latence={p2p_metrics['avg_duration_ms']}ms")
         conn.commit()
         cursor.close()
         conn.close()
