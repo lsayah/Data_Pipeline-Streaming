@@ -21,6 +21,7 @@ import random
 import signal
 import time
 import uuid
+import os 
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -38,8 +39,8 @@ logger = logging.getLogger("p2p_simulator")
 # CONFIGURATION
 # ─────────────────────────────────────────────────────────────
 
-REDIS_URL = "redis://localhost:6379/1"
-KAFKA_BOOTSTRAP = "kafka-1:9092"       # Phase 2
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/1")
+KAFKA_BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP", "kafka-1:9092")
 
 TOPICS = {
     "listening":   "listening_events",
@@ -59,7 +60,7 @@ def _load_catalog() -> list:
     """Charge les vrais track_id depuis PostgreSQL. Fallback sur des IDs aléatoires si indisponible."""
     try:
         import psycopg2
-        conn = psycopg2.connect(host="localhost", port=5432, dbname="spotify", user="spotify", password="spotify")
+        conn = psycopg2.connect(host=os.environ.get("POSTGRES_HOST", "localhost"), port=5432, dbname="spotify", user="spotify", password="spotify")
         with conn.cursor() as cur:
             cur.execute("SELECT id::text, title, duration_ms FROM tracks LIMIT 100")
             rows = cur.fetchall()
