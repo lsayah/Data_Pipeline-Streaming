@@ -25,9 +25,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 import redis
-
-# Phase 2 — décommenter quand Kafka est prêt
-# from confluent_kafka import Producer
+from confluent_kafka import Producer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -107,8 +105,12 @@ class P2PSimulator:
         # Connexion Redis
         self.redis = redis.from_url(REDIS_URL, decode_responses=True)
 
-        # Phase 2 — Kafka producer
-        # self.kafka_producer = Producer({"bootstrap.servers": KAFKA_BOOTSTRAP})
+        # Kafka producer
+        self.kafka_producer = Producer({
+            "bootstrap.servers": KAFKA_BOOTSTRAP,
+            "acks": "all",
+            "enable.idempotence": True,
+        })
 
         # Peers actifs simulés
         self.active_peers = [str(uuid.uuid4()) for _ in range(n_peers)]
@@ -162,16 +164,14 @@ class P2PSimulator:
             "event_source": random.choice(EVENT_SOURCES)
         }
 
-        # Mode fraud (Phase 2) — décommenter
-        # if self.mode == "fraud" and random.random() < 0.3:
-        #     event["duration_ms"] = random.randint(100, 4999)
-        #     event["completed"] = False
+        if self.mode == "fraud" and random.random() < 0.3:
+            event["duration_ms"] = random.randint(100, 4999)
+            event["completed"] = False
 
-        # Mode late_events (Phase 2) — décommenter
-        # if self.mode == "late_events" and random.random() < 0.4:
-        #     delay_minutes = random.randint(5, 30)
-        #     ts = datetime.utcnow() - timedelta(minutes=delay_minutes)
-        #     event["timestamp"] = ts.isoformat() + "Z"
+        if self.mode == "late_events" and random.random() < 0.4:
+            delay_minutes = random.randint(5, 30)
+            ts = datetime.utcnow() - timedelta(minutes=delay_minutes)
+            event["timestamp"] = ts.isoformat() + "Z"
 
         return event
 
@@ -209,8 +209,7 @@ class P2PSimulator:
         channel = TOPICS[topic_key]
 
         self._publish_to_redis(channel, payload)
-        # Phase 2 — décommenter
-        # self._publish_to_kafka(channel, event.get("user_id", ""), payload)
+        self._publish_to_kafka(channel, event.get("user_id") or event.get("source_peer", ""), payload)
 
     def _publish_to_redis(self, channel: str, payload: str):
         """
@@ -223,18 +222,27 @@ class P2PSimulator:
         except Exception as e:
             logger.error(f"Erreur Redis ({channel}): {e}")
 
-    # def _publish_to_kafka(self, topic: str, key: str, payload: str):
-    #     """
-    #     TODO Phase 2 : publier payload dans le topic Kafka.
-    #     - key     : utilisé pour le partitionnement (user_id ou peer_id)
-    #     - acks    : 'all' pour la durabilité
-    #     - Gérer le callback de confirmation (delivery_report)
-    #     """
-    #     raise NotImplementedError("TODO Phase 2 : implémenter _publish_to_kafka()")
+    def _publish_to_kafka(self, topic: str, key: str, payload: str):
+        """Publie payload dans le topic Kafka avec confirmation de livraison."""
+        def delivery_report(err, _msg):
+            if err:
+                logger.error(f"Kafka échec livraison ({topic}): {err}")
+
+        try:
+            self.kafka_producer.produce(
+                topic,
+                key=key.encode("utf-8"),
+                value=payload.encode("utf-8"),
+                callback=delivery_report,
+            )
+            self.kafka_producer.poll(0)
+        except Exception as e:
+            logger.error(f"Erreur Kafka ({topic}): {e}")
 
     def _shutdown(self, signum, frame):
         logger.info(f"Arrêt du simulateur (signal {signum}) — {self.event_count} événements publiés")
         self.running = False
+        self.kafka_producer.flush(timeout=10)
 
 
 # ─────────────────────────────────────────────────────────────
