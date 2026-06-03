@@ -40,7 +40,7 @@ logger = logging.getLogger("p2p_simulator")
 # CONFIGURATION
 # ─────────────────────────────────────────────────────────────
 
-REDIS_URL = "redis://localhost:6379/1"
+REDIS_URL = "redis://redis:6379/1"
 KAFKA_BOOTSTRAP = "kafka-1:9092"       # Phase 2
 
 TOPICS = {
@@ -61,7 +61,7 @@ def _load_catalog() -> list:
     """Charge les vrais track_id depuis PostgreSQL. Fallback sur des IDs aléatoires si indisponible."""
     try:
         import psycopg2
-        conn = psycopg2.connect(host="localhost", port=5432, dbname="spotify", user="spotify", password="spotify")
+        conn = psycopg2.connect(host="postgres", port=5432, dbname="spotify", user="spotify", password="spotify")
         with conn.cursor() as cur:
             cur.execute("SELECT id::text, title, duration_ms FROM tracks LIMIT 100")
             rows = cur.fetchall()
@@ -213,13 +213,8 @@ class P2PSimulator:
         # self._publish_to_kafka(channel, event.get("user_id", ""), payload)
 
     def _publish_to_redis(self, channel: str, payload: str):
-        """
-        TODO : publier payload dans le channel Redis via pub/sub.
-        Utiliser self.redis.publish(channel, payload)
-        Gérer l'exception si Redis est indisponible (log + skip).
-        """
         try:
-            self.redis.publish(channel, payload)
+            self.redis.lpush(channel, payload)
         except Exception as e:
             logger.error(f"Erreur Redis ({channel}): {e}")
 
