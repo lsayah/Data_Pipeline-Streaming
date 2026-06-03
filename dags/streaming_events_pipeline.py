@@ -102,11 +102,15 @@ with DAG(
         start_time = time.time()
 
         try:
-            while time.time() - start_time < BATCH_WINDOW_SEC:
-                message = r.blpop(["listening_events", "p2p_network_events"], timeout=1)
-                if message:
-                    events.append(json.loads(message[1]))
+            pubsub = r.pubsub()
+            pubsub.subscribe("listening_events", "p2p_network_events")
 
+            while time.time() - start_time < BATCH_WINDOW_SEC:
+                message = pubsub.get_message(ignore_subscribe_messages=True, timeout=1)
+                if message and message.get("type") == "message":
+                    events.append(json.loads(message["data"]))
+
+            pubsub.unsubscribe()
             print(f"✅ {len(events)} événements récupérés de Redis")
             return events
 
