@@ -288,6 +288,10 @@ with DAG(
                 e["track_id"],
                 e["timestamp"],
                 e["duration_ms"],
+                e.get("completed", False),
+                e.get("device_type"),
+                e.get("geo_country"),
+                e.get("event_source", "p2p"),
             )
             for e in enriched_events
         ]
@@ -298,8 +302,9 @@ with DAG(
             with conn.cursor() as cur:
                 cur.executemany(
                     """
-                    INSERT INTO listening_events (id, user_id, track_id, timestamp, duration_ms)
-                    VALUES (%s::uuid, %s::uuid, %s::uuid, %s::timestamp, %s)
+                    INSERT INTO listening_events
+                        (id, user_id, track_id, timestamp, duration_ms, completed, device_type, geo_country, event_source)
+                    VALUES (%s::uuid, %s::uuid, %s::uuid, %s::timestamp, %s, %s, %s, %s, %s)
                     ON CONFLICT (id) DO NOTHING
                     """,
                     rows,
