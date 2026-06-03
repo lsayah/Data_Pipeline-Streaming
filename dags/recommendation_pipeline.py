@@ -21,6 +21,7 @@ from airflow import DAG
 from airflow.decorators import task
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.sensors.external_task import ExternalTaskSensor
+from airflow.utils.trigger_rule import TriggerRule
 
 DAG_DOC = """
 ## recommendation_pipeline
@@ -78,12 +79,13 @@ with DAG(
         external_dag_id="aggregation_pipeline",
         external_task_id=None,
         allowed_states=["success"],
-        timeout=3600,
-        poke_interval=60,
+        timeout=120,
+        poke_interval=30,
         mode="reschedule",
+        soft_fail=True,
     )
 
-    @task(task_id="build_user_track_matrix")
+    @task(task_id="build_user_track_matrix", trigger_rule=TriggerRule.ALL_DONE)
     def build_user_track_matrix(**context) -> dict:
         """
         Construit la matrice user × track des écoutes des 7 derniers jours.
