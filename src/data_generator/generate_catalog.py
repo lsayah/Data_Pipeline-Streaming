@@ -139,8 +139,8 @@ def main():
     parser = argparse.ArgumentParser(description="SPOTIFY Catalog Generator")
     parser.add_argument("--artists",        type=int,  default=10,                    help="Artistes par label")
     parser.add_argument("--output",         type=str,  default="data/labels",         help="Dossier de sortie local")
-    parser.add_argument("--upload",         action="store_true",                      help="Uploader les JSONs dans MinIO")
-    parser.add_argument("--minio-endpoint", type=str,  default="http://localhost:9000", help="Endpoint MinIO")
+    parser.add_argument("--no-upload",       action="store_true",                      help="Ne pas uploader dans MinIO")
+    parser.add_argument("--minio-endpoint", type=str,  default=os.environ.get("MINIO_ENDPOINT", "http://localhost:9000"), help="Endpoint MinIO")
     args = parser.parse_args()
 
     output_dir = Path(args.output)
@@ -148,14 +148,12 @@ def main():
         catalog  = generate_label_catalog(label, n_artists=args.artists)
         filename = label.lower().replace(" ", "_") + ".json"
         save_as_json(catalog, output_dir / filename)
-        if args.upload:
+        if not args.no_upload:
             upload_to_minio(catalog, filename, endpoint=args.minio_endpoint)
 
     print(f"\n3 catalogues générés dans {output_dir}/")
-    if args.upload:
+    if not args.no_upload:
         print("Fichiers uploadés dans MinIO (bucket labels-raw)")
-    else:
-        print("Prochaine étape : uploader sur MinIO avec --upload")
 
 
 if __name__ == "__main__":
