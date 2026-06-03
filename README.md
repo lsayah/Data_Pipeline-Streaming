@@ -11,11 +11,34 @@ Ce projet se construit **brique par brique sur 5 jours**. Chaque livrable s'appu
 ## Ce que vous allez construire
 
 ```
-Sources ──► Kafka topics ──► Spark Streaming ──► PostgreSQL / Redis
-              │                                         │
-              └──► Airflow DAGs (batch) ────────────────┘
-                                                        │
-                                              MinIO (Parquet)
+                        SPOTIFY — Architecture
+
+  ┌─────────────────┐                     ┌─────────────────┐
+  │  P2P Simulator  │──── Redis pub/sub ──►│                 │
+  │  (Python)       │                      │   Airflow 2.9   │
+  └─────────────────┘                      │     :8080       │
+                                           │                 │
+  ┌─────────────────┐                      │  catalog @02:00 │
+  │  Data Generator │──── MinIO ──────────►│  events  @5min  │
+  │  (Faker)        │   labels-raw/        │  aggr.   @04:00 │
+  └─────────────────┘                      │  reco.   @05:00 │
+                                           │  DLQ     @1h    │
+                                           └────────┬────────┘
+                                                    │
+                              ┌─────────────────────┼──────────────────┐
+                              ▼                     ▼                  ▼
+                    ┌──────────────────┐  ┌──────────────┐  ┌──────────────┐
+                    │  PostgreSQL      │  │  Redis       │  │  MinIO       │
+                    │  :5432           │  │  :6379       │  │  :9000       │
+                    │                 │  │              │  │              │
+                    │  catalogue      │  │  reco users  │  │  Parquet     │
+                    │  événements     │  │  top tracks  │  │  /date/heure │
+                    │  agrégats       │  │  (cache)     │  │              │
+                    │  DLQ            │  └──────────────┘  └──────────────┘
+                    └──────────────────┘
+
+  ── Phase 2 ────────────────────────────────────────────────────────
+  P2P Simulator ──► Kafka (3 brokers) ──► Spark (3 jobs) ──► PostgreSQL
 ```
 
 | Couche | Technologie | Ce que vous implémentez |
