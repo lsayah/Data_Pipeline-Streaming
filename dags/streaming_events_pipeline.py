@@ -97,15 +97,22 @@ with DAG(
 
     @task(task_id="consume_from_redis")
     def consume_from_redis() -> List[dict]:
+
+        # Se connecter à Redis
         r = redis.from_url("redis://redis:6379/1", decode_responses=True)
+
+        # S'abonner aux deux channels pub/sub
+        pubsub = r.pubsub()
+        pubsub.subscribe("listening_events", "p2p_network_events")
+
         events = []
         start_time = time.time()
 
         try:
             while time.time() - start_time < BATCH_WINDOW_SEC:
-                message = r.blpop(["listening_events", "p2p_network_events"], timeout=1)
-                if message:
-                    events.append(json.loads(message[1]))
+                message = pubsub.get_message(timeout=1)
+                if message and message["type"] == "message":
+                    events.append(json.loads(message["data"]))
 
             print(f"✅ {len(events)} événements récupérés de Redis")
             return events
@@ -113,6 +120,10 @@ with DAG(
         except Exception as e:
             print(f"❌ Erreur Redis: {e}")
             return []
+
+        finally:
+            pubsub.unsubscribe()
+            pubsub.close()
 
     @task(task_id="validate_events")
     def validate_events(raw_events: List[dict]) -> dict:
@@ -302,9 +313,8 @@ with DAG(
             with conn.cursor() as cur:
                 cur.executemany(
                     """
-                    INSERT INTO listening_events
-                        (id, user_id, track_id, timestamp, duration_ms, completed, device_type, geo_country, event_source)
-                    VALUES (%s::uuid, %s::uuid, %s::uuid, %s::timestamp, %s, %s, %s, %s, %s)
+                    INSERT INTO listening_events (id, user_id, track_id, timestamp, duration_ms)
+                    VALUES (%s::uuid, %s::uuid, %s::uuid, %s::timestamp, %s)
                     ON CONFLICT (id) DO NOTHING
                     """,
                     rows,
