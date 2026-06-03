@@ -299,6 +299,10 @@ with DAG(
                 e["track_id"],
                 e["timestamp"],
                 e["duration_ms"],
+                e.get("completed", False),
+                e.get("device_type"),
+                e.get("geo_country"),
+                e.get("event_source", "p2p"),
             )
             for e in enriched_events
         ]

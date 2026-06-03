@@ -1,140 +1,187 @@
 # RUNBOOK SPOTIFY — Procédures incidents
 
-> Ce document doit être complété par votre groupe au fur et à mesure de la semaine.
-> Un bon runbook = ce dont vous auriez eu besoin pendant la panne.
+Procédures opérationnelles rédigées pendant la semaine.
+Chaque incident décrit ici s'est produit ou peut se reproduire sur le système en cours d'exécution.
 
 ---
 
-## Incidents Phase 1 — Airflow / Batch
+## INC-01 — streaming_events_pipeline ne reçoit aucun événement depuis Redis
 
-### INC-01 — DAG bloqué en "running" depuis > 30 minutes
+On a passé un bon moment à se demander pourquoi nos tâches passaient en vert avec 0 event
+alors que le simulateur tournait. Le DAG finissait en succès, Parquet vide, PostgreSQL vide,
+tout vide. Aucune erreur dans les logs.
 
-**Symptômes :** Une tâche reste en état `running` dans l'UI Airflow.
+**Ce qui se passait vraiment :**
+La tâche `consume_from_redis` utilisait `blpop` — qui lit depuis une **liste** Redis.
+Sauf que le simulateur publie via `publish`, donc dans un **channel pub/sub**.
+Ces deux mécanismes n'ont rien à voir. `blpop` attendait des messages qui n'arriveraient jamais.
 
-**Diagnostic :**
+**Comment on a trouvé :**
+
 ```bash
-# Voir les logs de la tâche
-docker compose logs airflow-worker -f
+# Vérifier si Redis contient vraiment des données dans une liste
+docker exec redis redis-cli LLEN listening_events
+# → 0 ... normal, c'est pas une liste
 
-# Lister les tâches actives
-docker exec airflow-scheduler airflow tasks states-for-dag-run <dag_id> <run_id>
+# Vérifier les channels pub/sub actifs
+docker exec redis redis-cli PUBSUB CHANNELS
+# → "listening_events" et "p2p_network_events" apparaissent ici
+# → confirmation : le simulateur publie bien, mais on écoutait au mauvais endroit
 ```
 
-**Résolution :**
-```bash
-# Marquer la tâche comme failed manuellement
-docker exec airflow-scheduler airflow tasks clear <dag_id> -t <task_id> --yes
+**Le fix :**
 
-# Ou tuer le worker et le relancer
-docker compose restart airflow-worker
+Remplacer `blpop` par une vraie souscription pub/sub :
+
+```python
+# AVANT (ne fonctionnait pas)
+r = redis.from_url("redis://redis:6379/1")
+data = r.blpop("listening_events", timeout=5)
+
+# APRÈS (correct)
+pubsub = r.pubsub()
+pubsub.subscribe("listening_events", "p2p_network_events")
+message = pubsub.get_message(timeout=1)
+if message and message["type"] == "message":
+    event = json.loads(message["data"])
 ```
 
-**Cause probable :** → À compléter par votre groupe après avoir rencontré cet incident
+**À retenir :** Redis a deux mécanismes bien distincts. `lpush`/`blpop` = file de messages.
+`publish`/`subscribe` = diffusion temps réel. Notre simulateur utilise `publish`, donc
+on doit toujours utiliser `pubsub.subscribe`.
 
 ---
 
-### INC-02 — PostgreSQL : `too many connections`
+## INC-02 — enrich_events envoie tout en DLQ, listening_events reste vide
 
-**Symptômes :** Les tâches Airflow échouent avec `FATAL: too many connections`.
+Après avoir fixé le problème Redis, les events arrivaient bien dans le pipeline.
+Mais `listening_events` restait vide et la DLQ se remplissait à toute vitesse avec
+l'erreur `"unknown_track"`. 100% des events envoyés en dead letter.
 
-**Diagnostic :**
-```sql
-SELECT count(*), state FROM pg_stat_activity GROUP BY state;
-SELECT max_conn FROM pg_settings WHERE name='max_connections';
-```
+**Ce qui se passait vraiment :**
+Le simulateur P2P générait des `track_id` au hasard (UUID aléatoires).
+La tâche `enrich_events` cherche ces IDs dans la table `tracks` de PostgreSQL,
+ne les trouve pas → envoie l'event en DLQ. Logique, mais on n'avait pas vu
+qu'il fallait que le simulateur charge les vrais IDs depuis la base.
 
-**Résolution :**
+**Vérification rapide :**
+
 ```bash
-# Augmenter max_connections dans docker-compose
-# PostgreSQL environment: POSTGRES_MAX_CONNECTIONS: 200
+# Voir ce que contient la DLQ
+docker exec postgres psql -U spotify -d spotify -c "
+  SELECT error_type, count(*) FROM dead_letter_events GROUP BY error_type;
+"
+# → unknown_track | 847   ← tous nos events
 
-# Court terme : killer les connexions idle
-# SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state='idle';
+# Vérifier si tracks est bien peuplé
+docker exec postgres psql -U spotify -d spotify -c "
+  SELECT count(*) FROM tracks;
+"
+# → 0 ou un petit nombre → catalog_ingestion n'a pas encore tourné
+
+# Ou si tracks est peuplé, vérifier qu'un track_id du simulateur existe
+docker exec redis redis-cli SUBSCRIBE listening_events
+# Attendre un event, copier un track_id, puis :
+docker exec postgres psql -U spotify -d spotify -c "
+  SELECT id FROM tracks WHERE id = 'le-track-id-du-simulateur'::uuid;
+"
+# → 0 rows → l'ID n'existe pas en base
 ```
 
-**Prévention :** → À compléter (hint : Airflow pools)
+**Le fix :**
+Implémenter `_load_catalog()` dans le simulateur pour qu'il charge les vrais IDs
+depuis PostgreSQL au démarrage, au lieu d'en générer aléatoirement :
+
+```python
+def _load_catalog(self):
+    """Charge les track_ids réels depuis PostgreSQL."""
+    try:
+        conn = psycopg2.connect(os.environ.get("POSTGRES_URI"))
+        cur = conn.cursor()
+        cur.execute("SELECT id::text FROM tracks LIMIT 500")
+        self.track_ids = [row[0] for row in cur.fetchall()]
+        conn.close()
+        print(f"Simulateur : {len(self.track_ids)} tracks chargés depuis PostgreSQL")
+    except Exception as e:
+        print(f"Impossible de charger le catalogue: {e} — utilisation d'IDs aléatoires")
+        self.track_ids = [str(uuid.uuid4()) for _ in range(100)]
+```
+
+**À retenir :** Si `listening_events` est vide et la DLQ se remplit avec `unknown_track`,
+vérifier dans cet ordre : (1) est-ce que `tracks` est peuplé ? (2) est-ce que le simulateur
+charge les vrais IDs ? Ne pas chercher plus loin avant d'avoir vérifié ces deux points.
 
 ---
 
-### INC-03 — MinIO inaccessible depuis Airflow
+## INC-03 — aggregation_pipeline : Airflow vert mais daily_streams vide
 
-**Symptômes :** Les tâches de lecture/écriture Parquet échouent avec `Connection refused`.
+C'est notre incident actuel (#7), pas encore complètement résolu.
+Le DAG tourne sans erreur visible, toutes les tâches passent en vert,
+mais `SELECT * FROM daily_streams` retourne 0 lignes.
 
-**Diagnostic :**
+**Ce qu'on a identifié jusqu'ici :**
+
 ```bash
-docker compose ps minio
-curl http://localhost:9000/minio/health/live
+# 1. Vérifier si listening_events a des données (prérequis de tout)
+docker exec postgres psql -U spotify -d spotify -c "
+  SELECT count(*), DATE(timestamp) as jour
+  FROM listening_events
+  GROUP BY jour
+  ORDER BY jour DESC;
+"
+# Si 0 lignes → streaming_events_pipeline n'a pas inséré de données
+# → retourner à INC-01 et INC-02 d'abord
+
+# 2. Si listening_events a des données, vérifier le filtre completed
+docker exec postgres psql -U spotify -d spotify -c "
+  SELECT completed, count(*) FROM listening_events GROUP BY completed;
+"
+# Si completed est NULL pour tout → la requête WHERE completed = TRUE retourne 0 lignes
+# → c'est probablement la cause
+
+# 3. Voir ce que retourne la requête d'agrégation manuellement
+docker exec postgres psql -U spotify -d spotify -c "
+  SELECT track_id, COUNT(*) as total_streams
+  FROM listening_events
+  WHERE DATE(timestamp) = CURRENT_DATE
+  GROUP BY track_id
+  ORDER BY total_streams DESC
+  LIMIT 5;
+"
+# Si 0 lignes avec CURRENT_DATE → vérifier la date des events insérés
+# (ils viennent peut-être du simulateur avec une date différente)
 ```
 
-**Résolution :**
+**Causes possibles qu'on a identifiées :**
+
+1. `completed` est NULL dans `listening_events` parce que `upsert_to_postgres` n'insère
+   pas cette colonne → la requête `WHERE completed = TRUE` filtre tout.
+   Fix : soit insérer `completed` depuis le simulateur, soit changer le filtre en
+   `WHERE (completed IS TRUE OR completed IS NULL)`.
+
+2. Le filtre sur `DATE(timestamp) = execution_date` ne matche rien si les timestamps
+   du simulateur sont décalés (timezone UTC vs locale).
+
+3. L'`ExternalTaskSensor` attend `streaming_events_pipeline` avec la même `execution_date`
+   que le DAG d'agrégation (04:00 UTC). Mais `streaming_events_pipeline` tourne toutes
+   les 5 min, donc il n'a jamais de run à exactement 04:00 → le sensor timeout après 1h.
+
+**Ce qu'on a essayé :**
+
 ```bash
-docker compose restart minio
-# Attendre 10s puis relancer le DAGRun
+# Vérifier que l'ExternalTaskSensor trouve bien un run réussi
+docker exec airflow-scheduler airflow tasks states-for-dag-run \
+  aggregation_pipeline scheduled__2025-01-15T04:00:00+00:00
+
+# Regarder les logs du sensor pour voir ce qu'il attend
+docker compose logs airflow-scheduler | grep "ExternalTaskSensor\|wait_for"
 ```
+
+**À documenter quand résolu :** cause exacte + commande qui a confirmé le fix.
 
 ---
 
-## Incidents Phase 2 — Kafka / Spark
-
-### INC-04 — Consumer lag Kafka qui explose
-
-**Symptômes :** Kafka UI → consumer group `spark-streaming-trends` → lag > 10 000
-
-**Diagnostic :**
-```bash
-# Vérifier le throughput Spark
-docker logs spark-master -f | grep "Batch Duration"
-
-# Vérifier les ressources
-docker stats spark-worker-1
-```
-
-**Résolution :**
-→ À compléter par votre groupe
-
----
-
-### INC-05 — Job Spark crash avec OutOfMemory
-
-**Symptômes :** `java.lang.OutOfMemoryError: GC overhead limit exceeded`
-
-**Diagnostic :**
-```bash
-docker logs spark-master -f | grep -i "error\|exception\|oom"
-```
-
-**Résolution :**
-```bash
-# Augmenter la mémoire du worker dans docker-compose
-# SPARK_WORKER_MEMORY: 4G
-
-# Réduire le state store : ajouter un TTL sur flatMapGroupsWithState
-# GroupState.setTimeoutDuration("1 hour")
-```
-
----
-
-### INC-06 — Spark ne reprend pas depuis le checkpoint
-
-**Symptômes :** Après redémarrage, le job repart de zéro au lieu du checkpoint.
-
-**Diagnostic :**
-```bash
-# Vérifier que le checkpoint est sur MinIO
-docker exec minio mc ls local/spotify-checkpoints/streaming_trends/
-
-# Vérifier les logs Spark au démarrage
-docker logs spark-master | grep "checkpoint"
-```
-
-**Résolution :**
-→ À compléter par votre groupe
-
----
-
-## Chaos Engineering — Résultats
-
-> Compléter pendant l'issue #25 (vendredi)
+## Chaos Engineering (Phase 3 — à compléter vendredi)
 
 ### Scénario 1 : Arrêt d'un broker Kafka
 
