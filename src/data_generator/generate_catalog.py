@@ -8,26 +8,10 @@ Usage :
     python -m src.data_generator.generate_catalog --labels data/labels/ --output sql/catalog_seed.sql
     python -m src.data_generator.generate_catalog --format json --output data/labels/label_a.json
 """
-import boto3
-import os
-import glob
-
-s3 = boto3.client('s3', endpoint_url='http://localhost:9000',
-                  aws_access_key_id='minioadmin',
-                  aws_secret_access_key='minioadmin')
-
-# Récupère tous les fichiers JSON dans data/labels
-json_files = glob.glob('data/labels/*.json')
-
-for file_path in json_files:
-    file_name = os.path.basename(file_path)  # ex: sunset_records.json
-    s3.upload_file(file_path, 'labels-raw', file_name)
-    print(f"Uploaded: {file_name}")
-
-
-    
 import argparse
 import json
+import os
+import glob
 import random
 import uuid
 from datetime import datetime, date
@@ -135,6 +119,8 @@ def save_as_json(catalog: dict, output_path: Path):
 
 def upload_to_minio(catalog: dict, filename: str, endpoint: str = "http://localhost:9000"):
     """Upload le catalogue JSON vers MinIO dans le bucket labels-raw."""
+    import boto3
+    from botocore.exceptions import ClientError
     s3 = boto3.client(
         "s3",
         endpoint_url=endpoint,
