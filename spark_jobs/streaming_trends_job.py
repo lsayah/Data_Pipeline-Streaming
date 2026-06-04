@@ -47,6 +47,8 @@ POSTGRES_PROPS  = {
     "password": "spotify",
     "driver":   "org.postgresql.Driver",
 }
+REDIS_HOST      = os.getenv("REDIS_HOST", "redis")
+REDIS_PORT      = int(os.getenv("REDIS_PORT", "6379"))
 
 # ─────────────────────────────────────────────────────────────
 # SCHÉMA DES ÉVÉNEMENTS D'ÉCOUTE
@@ -115,31 +117,111 @@ def read_kafka_stream(spark: SparkSession):
 
 
 # ─────────────────────────────────────────────────────────────
-# SINK CONSOLE — Issue #13 : validation lecture Kafka
+# AGRÉGATIONS STREAMING — Issue #14
 # ─────────────────────────────────────────────────────────────
 
 def compute_top_tracks_tumbling(events_df):
     """
-    Issue #13 : console sink pour valider la lecture Kafka.
-    Expérimenter avec processingTime("10 seconds") et Once().
-    Issue #14 : remplacer par les fenêtres tumbling → PostgreSQL.
+    Top tracks par fenêtre fixe de 5 minutes → PostgreSQL.
+
+    Pourquoi tumbling window ?
+    On découpe le temps en tranches fixes non chevauchantes : [0h00-0h05], [0h05-0h10]...
+    Chaque tranche calcule le classement indépendamment.
     """
+    windowed = (
+        events_df
+        .groupBy(F.window("event_time", "5 minutes"), "track_id")
+        .agg(
+            F.count("*").alias("stream_count"),
+            F.approx_count_distinct("user_id").alias("unique_listeners"),
+        )
+    )
+
+    def write_batch(batch_df, batch_id):
+        if batch_df.isEmpty():
+            return
+        import psycopg2
+        rows = (
+            batch_df
+            .select(
+                F.col("window.start").alias("window_start"),
+                F.col("window.end").alias("window_end"),
+                "track_id",
+                "stream_count",
+                "unique_listeners",
+            )
+            .collect()
+        )
+        conn = psycopg2.connect(
+            host="postgres", port=5432, dbname="spotify",
+            user="spotify", password="spotify"
+        )
+        with conn.cursor() as cur:
+            for row in rows:
+                cur.execute(
+                    """
+                    INSERT INTO realtime_top_tracks
+                        (window_start, window_end, track_id, stream_count, unique_listeners)
+                    VALUES (%s, %s, %s::uuid, %s, %s)
+                    ON CONFLICT (window_start, track_id) DO UPDATE SET
+                        stream_count     = EXCLUDED.stream_count,
+                        unique_listeners = EXCLUDED.unique_listeners,
+                        updated_at       = NOW()
+                    """,
+                    (row.window_start, row.window_end, row.track_id,
+                     row.stream_count, row.unique_listeners),
+                )
+        conn.commit()
+        conn.close()
+
     return (
-        events_df.writeStream
-        .format("console")
-        .outputMode("append")
-        .option("checkpointLocation", CHECKPOINT_PATH + "/console")
-        .option("truncate", False)
-        .trigger(processingTime="10 seconds")  # tester aussi : .trigger(once=True)
+        windowed
+        .writeStream
+        .outputMode("update")
+        .foreachBatch(write_batch)
+        .option("checkpointLocation", CHECKPOINT_PATH + "/top_tracks")
         .start()
     )
 
 
 def compute_genre_listeners_sliding(events_df, catalog_df):
     """
-    Issue #14 — sliding window 15 min / slide 5 min → Redis.
+    Listeners uniques par genre en sliding window (15 min / slide 5 min) → Redis.
+
+    Pourquoi sliding window ?
+    Toutes les 5 min on recalcule sur les 15 dernières minutes.
+    Utile pour avoir un "top genres en ce moment" qui se met à jour en continu.
     """
-    raise NotImplementedError("TODO issue #14 : implémenter compute_genre_listeners_sliding()")
+    enriched = events_df.join(
+        catalog_df.select("id", "genre"),
+        F.col("track_id") == F.col("id"),
+        "left"
+    )
+
+    windowed = (
+        enriched
+        .groupBy(F.window("event_time", "15 minutes", "5 minutes"), "genre")
+        .agg(F.approx_count_distinct("user_id").alias("unique_listeners"))
+    )
+
+    def write_to_redis(batch_df, batch_id):
+        if batch_df.isEmpty():
+            return
+        import redis, json
+        r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0, decode_responses=True)
+        rows = batch_df.collect()
+        result = {row["genre"]: row["unique_listeners"] for row in rows if row["genre"]}
+        if result:
+            r.set("genre_listeners:live", json.dumps(result))
+
+    return (
+        windowed
+        .writeStream
+        .outputMode("update")
+        .foreachBatch(write_to_redis)
+        .option("checkpointLocation", CHECKPOINT_PATH + "/genre_listeners")
+        .start()
+    )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -156,7 +238,11 @@ def main():
 
     events_df = read_kafka_stream(spark)
 
+    # Catalogue statique pour la jointure genre (chargé une seule fois au démarrage)
+    catalog_df = spark.read.jdbc(POSTGRES_URL, "tracks", properties=POSTGRES_PROPS)
+
     query_top_tracks = compute_top_tracks_tumbling(events_df)
+    query_genres     = compute_genre_listeners_sliding(events_df, catalog_df)
 
     spark.streams.awaitAnyTermination()
 
