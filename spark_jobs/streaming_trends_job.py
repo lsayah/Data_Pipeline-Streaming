@@ -114,6 +114,7 @@ def read_kafka_stream(spark: SparkSession):
         .select("data.*")
         .withColumn("event_time", F.col("timestamp").cast(TimestampType()))
         .drop("timestamp")
+        .withWatermark("event_time", "10 minutes")
     )
 
 
@@ -226,6 +227,32 @@ def compute_genre_listeners_sliding(events_df, catalog_df):
 
 
 # ─────────────────────────────────────────────────────────────
+# ROUTAGE LATE EVENTS — Issue #15
+# ─────────────────────────────────────────────────────────────
+
+def route_late_events(events_df):
+    """
+    Détecte les events arrivés avec plus de 10 min de retard et les route
+    vers le topic late_listening_events pour retraitement Airflow plus tard.
+    """
+    late_events = events_df.filter(
+        F.col("event_time") < (F.current_timestamp() - F.expr("INTERVAL 10 MINUTES"))
+    )
+
+    return (
+        late_events
+        .select(F.to_json(F.struct("*")).alias("value"))
+        .writeStream
+        .format("kafka")
+        .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP)
+        .option("topic", "late_listening_events")
+        .option("checkpointLocation", CHECKPOINT_PATH + "/late_events")
+        .outputMode("append")
+        .start()
+    )
+
+
+# ─────────────────────────────────────────────────────────────
 # POINT D'ENTRÉE
 # ─────────────────────────────────────────────────────────────
 
@@ -244,6 +271,7 @@ def main():
 
     query_top_tracks = compute_top_tracks_tumbling(events_df)
     query_genres     = compute_genre_listeners_sliding(events_df, catalog_df)
+    query_late       = route_late_events(events_df)
 
     spark.streams.awaitAnyTermination()
 
