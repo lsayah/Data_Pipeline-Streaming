@@ -102,6 +102,7 @@ def read_kafka_stream(spark: SparkSession):
         .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP)
         .option("subscribe", KAFKA_TOPIC)
         .option("startingOffsets", "latest")
+        .option("kafka.isolation.level", "read_committed")
         .load()
     )
 
