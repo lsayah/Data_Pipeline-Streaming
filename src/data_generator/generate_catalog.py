@@ -8,15 +8,18 @@ Usage :
     python -m src.data_generator.generate_catalog --labels data/labels/ --output sql/catalog_seed.sql
     python -m src.data_generator.generate_catalog --format json --output data/labels/label_a.json
 """
-
 import argparse
 import json
+import os
+import glob
 import random
 import uuid
 from datetime import datetime, date
 from datetime import timezone
 from pathlib import Path
 
+import boto3
+from botocore.exceptions import ClientError
 from faker import Faker
 
 fake = Faker(["fr_FR", "en_US", "de_DE", "es_ES"])
@@ -114,20 +117,43 @@ def save_as_json(catalog: dict, output_path: Path):
     print(f"Catalogue sauvegardé : {output_path} ({catalog['stats']})")
 
 
+def upload_to_minio(catalog: dict, filename: str, endpoint: str = "http://localhost:9000"):
+    """Upload le catalogue JSON vers MinIO dans le bucket labels-raw."""
+    import boto3
+    from botocore.exceptions import ClientError
+    s3 = boto3.client(
+        "s3",
+        endpoint_url=endpoint,
+        aws_access_key_id="minioadmin",
+        aws_secret_access_key="minioadmin",
+    )
+    body = json.dumps(catalog, indent=2, ensure_ascii=False).encode("utf-8")
+    try:
+        s3.put_object(Bucket="labels-raw", Key=filename, Body=body, ContentType="application/json")
+        print(f"  ✓ Uploadé : labels-raw/{filename}")
+    except ClientError as e:
+        print(f"  ✗ Erreur MinIO pour {filename} : {e}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="SPOTIFY Catalog Generator")
-    parser.add_argument("--artists", type=int, default=10, help="Artistes par label")
-    parser.add_argument("--output",  type=str, default="data/labels", help="Dossier de sortie")
+    parser.add_argument("--artists",        type=int,  default=10,                    help="Artistes par label")
+    parser.add_argument("--output",         type=str,  default="data/labels",         help="Dossier de sortie local")
+    parser.add_argument("--no-upload",       action="store_true",                      help="Ne pas uploader dans MinIO")
+    parser.add_argument("--minio-endpoint", type=str,  default=os.environ.get("MINIO_ENDPOINT", "http://localhost:9000"), help="Endpoint MinIO")
     args = parser.parse_args()
 
     output_dir = Path(args.output)
     for label in LABEL_NAMES:
-        catalog = generate_label_catalog(label, n_artists=args.artists)
+        catalog  = generate_label_catalog(label, n_artists=args.artists)
         filename = label.lower().replace(" ", "_") + ".json"
         save_as_json(catalog, output_dir / filename)
+        if not args.no_upload:
+            upload_to_minio(catalog, filename, endpoint=args.minio_endpoint)
 
     print(f"\n3 catalogues générés dans {output_dir}/")
-    print("Prochaine étape : uploader sur MinIO et lancer le DAG catalog_ingestion_pipeline")
+    if not args.no_upload:
+        print("Fichiers uploadés dans MinIO (bucket labels-raw)")
 
 
 if __name__ == "__main__":
