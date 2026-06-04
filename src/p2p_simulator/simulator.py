@@ -111,7 +111,10 @@ class P2PSimulator:
             "bootstrap.servers": KAFKA_BOOTSTRAP,
             "acks": "all",
             "enable.idempotence": True,
+            "transactional.id": "p2p-simulator-1",
         })
+
+        self.kafka_producer.init_transactions()
 
         # Peers actifs simulés
         self.active_peers = [str(uuid.uuid4()) for _ in range(n_peers)]
@@ -122,28 +125,26 @@ class P2PSimulator:
         logger.info(f"Simulateur démarré | mode={mode} | peers={n_peers} | rate={events_per_second} evt/s")
 
     def run(self):
-        """Boucle principale : génère et publie des événements en continu."""
         interval = 1.0 / self.events_per_second
+        # self.kafka_producer.init_transactions()
 
         while self.running:
             try:
-                # Alterner listening et réseau P2P (80% / 20%)
+                self.kafka_producer.begin_transaction()
                 if random.random() < 0.8:
                     event = self._generate_listening_event()
                     self._publish_event("listening", event)
                 else:
                     event = self._generate_p2p_network_event()
                     self._publish_event("p2p_network", event)
-
+                self.kafka_producer.commit_transaction()
                 self.event_count += 1
-
                 if self.event_count % 100 == 0:
                     logger.info(f"Événements publiés : {self.event_count}")
-
                 time.sleep(interval)
-
             except Exception as e:
-                logger.error(f"Erreur lors de la génération d'événement : {e}")
+                logger.error(f"Erreur : {e}")
+                self.kafka_producer.abort_transaction()
                 time.sleep(1)
 
     # ── Génération d'événements ──────────────────────────────
