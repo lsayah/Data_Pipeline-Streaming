@@ -270,7 +270,17 @@ services:
   # ─────────────────────────────────────────
 
   spark-master:
-    image: apache/spark:3.5.0
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM apache/spark:3.5.0
+        USER root
+        RUN python3 -m pip install --no-cache-dir \
+            pandas \
+            pyarrow \
+            psycopg2-binary \
+            redis
+        USER spark
     command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
     environment:
       SPARK_MASTER_PORT: 7077
@@ -280,9 +290,20 @@ services:
       - "8888:8888"
     volumes:
       - ./spark_jobs:/opt/spark-jobs
+      - ./conf/log4j2.properties:/opt/spark/conf/log4j2.properties
 
   spark-worker-1:
-    image: apache/spark:3.5.0
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM apache/spark:3.5.0
+        USER root
+        RUN python3 -m pip install --no-cache-dir \
+            pandas \
+            pyarrow \
+            psycopg2-binary \
+            redis
+        USER spark
     command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
     environment:
       SPARK_WORKER_MEMORY: 2G
