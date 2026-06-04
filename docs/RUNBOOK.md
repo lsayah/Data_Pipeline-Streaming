@@ -216,3 +216,60 @@ docker compose logs airflow-scheduler | grep "ExternalTaskSensor\|wait_for"
 **Comportement observé (Spark) :** ...
 
 **Données perdues :** oui / non — détails : ...
+
+
+---
+
+## INC-04 — Exactly-once semantics : vérification des doublons après redémarrage Spark
+
+### Contexte
+Configurer la chaîne exactly-once complète : producteur → Kafka → Spark → sinks.
+
+### Configuration mise en place
+
+**Producteur (simulator.py) :**
+```python
+self.kafka_producer = Producer({
+    "bootstrap.servers": KAFKA_BOOTSTRAP,
+    "acks": "all",
+    "enable.idempotence": True,
+    "transactional.id": "p2p-simulator-1",
+})
+```
+
+**Consommateur Spark (streaming_trends_job.py) :**
+```python
+.option("kafka.isolation.level", "read_committed")
+```
+
+### Procédure de vérification
+
+**1. Lancer le job Spark et le simulateur**
+```bash
+# Terminal 1 — job Spark
+docker exec -it data_pipeline-streaming-spark-master-1 /opt/spark/bin/spark-submit \
+  --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.postgresql:postgresql:42.7.1 \
+  /opt/spark-jobs/streaming_trends_job.py
+
+# Terminal 2 — simulateur
+KAFKA_BOOTSTRAP=localhost:9092 python -m src.p2p_simulator.simulator --peers 5 --rate 2
+```
+
+**2. Vérifier les doublons avant redémarrage**
+```bash
+docker exec -it data_pipeline-streaming-postgres-1 psql -U spotify -d spotify -c \
+  "SELECT COUNT(*) - COUNT(DISTINCT id) AS doublons FROM listening_events;"
+# → Résultat attendu : 0
+```
+
+**3. Arrêter le job Spark, attendre 1 minute, relancer**
+
+**4. Vérifier les doublons après redémarrage**
+```bash
+docker exec -it data_pipeline-streaming-postgres-1 psql -U spotify -d spotify -c \
+  "SELECT COUNT(*) - COUNT(DISTINCT id) AS doublons FROM listening_events;"
+# → Résultat attendu : 0
+```
+
+### Résultat observé
+0 doublons avant et après redémarrage 
