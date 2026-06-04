@@ -155,8 +155,9 @@ def compute_top_tracks_tumbling(events_df):
             .collect()
         )
         conn = psycopg2.connect(
-            host="postgres", port=5432, dbname="spotify",
-            user="spotify", password="spotify"
+            host=os.getenv("POSTGRES_HOST", "postgres"),
+            port=int(os.getenv("POSTGRES_PORT", "5432")),
+            dbname="spotify", user="spotify", password="spotify",
         )
         with conn.cursor() as cur:
             for row in rows:
@@ -210,11 +211,14 @@ def compute_genre_listeners_sliding(events_df, catalog_df):
         if batch_df.isEmpty():
             return
         import redis, json
-        r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0, decode_responses=True)
+        r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=1, decode_responses=True)
         rows = batch_df.collect()
         result = {row["genre"]: row["unique_listeners"] for row in rows if row["genre"]}
         if result:
-            r.set("genre_listeners:live", json.dumps(result))
+            try:
+                r.set("genre_listeners:live", json.dumps(result))
+            except redis.RedisError as e:
+                print(f"Redis write error (non-bloquant): {e}")
 
     return (
         windowed

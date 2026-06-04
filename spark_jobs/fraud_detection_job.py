@@ -137,6 +137,7 @@ def read_listening_stream(spark: SparkSession):
         .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP)
         .option("subscribe", KAFKA_LISTENING)
         .option("startingOffsets", "latest")
+        .option("kafka.isolation.level", "read_committed")
         .load()
     )
     return (
@@ -156,6 +157,7 @@ def read_p2p_stream(spark: SparkSession):
         .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP)
         .option("subscribe", KAFKA_P2P)
         .option("startingOffsets", "latest")
+        .option("kafka.isolation.level", "read_committed")
         .load()
     )
     return (
@@ -260,8 +262,9 @@ def write_listening_alerts(alerts_df):
 
         import psycopg2
         conn = psycopg2.connect(
-            host="postgres", port=5432, dbname="spotify",
-            user="spotify", password="spotify",
+            host=os.getenv("POSTGRES_HOST", "postgres"),
+            port=int(os.getenv("POSTGRES_PORT", "5432")),
+            dbname="spotify", user="spotify", password="spotify",
         )
         try:
             with conn.cursor() as cur:
@@ -336,8 +339,9 @@ def write_p2p_fraud(p2p_df):
 
         import psycopg2
         conn = psycopg2.connect(
-            host="postgres", port=5432, dbname="spotify",
-            user="spotify", password="spotify",
+            host=os.getenv("POSTGRES_HOST", "postgres"),
+            port=int(os.getenv("POSTGRES_PORT", "5432")),
+            dbname="spotify", user="spotify", password="spotify",
         )
         try:
             with conn.cursor() as cur:

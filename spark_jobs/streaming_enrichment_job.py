@@ -109,6 +109,7 @@ def read_listening_stream(spark: SparkSession):
         .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP)
         .option("subscribe", KAFKA_INPUT)
         .option("startingOffsets", "earliest")
+        .option("kafka.isolation.level", "read_committed")
         .load()
     )
     return (

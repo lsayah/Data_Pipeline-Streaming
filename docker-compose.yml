@@ -285,12 +285,17 @@ services:
     environment:
       SPARK_MASTER_PORT: 7077
       SPARK_MASTER_WEBUI_PORT: 8888
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      KAFKA_BOOTSTRAP: kafka-1:9092
+      SPOTIFY_POSTGRES_URL: jdbc:postgresql://postgres:5432/spotify
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
     ports:
       - "7077:7077"
       - "8888:8888"
     volumes:
       - ./spark_jobs:/opt/spark-jobs
-      - ./conf/log4j2.properties:/opt/spark/conf/log4j2.properties
 
   spark-worker-1:
     build:
@@ -308,6 +313,12 @@ services:
     environment:
       SPARK_WORKER_MEMORY: 2G
       SPARK_WORKER_CORES: 2
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      KAFKA_BOOTSTRAP: kafka-1:9092
+      SPOTIFY_POSTGRES_URL: jdbc:postgresql://postgres:5432/spotify
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
     depends_on:
       - spark-master
     volumes:
